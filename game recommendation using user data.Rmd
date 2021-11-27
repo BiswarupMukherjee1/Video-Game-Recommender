@@ -1,0 +1,495 @@
+---
+title: "Game recommender Project"
+author: "Biswarup Mukherjee"
+date: "15/11/2021"
+output: html_document
+---
+## Steam Games User dataset: https://www.kaggle.com/tamber/steam-video-games
+
+### BISWARUP MUKHERJEE, TAMOJIT ROY, AKASH PATRA
+
+### Including required packages
+```{r }
+suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
+suppressMessages(library(mixtools))
+suppressMessages(library(caTools))
+suppressMessages(library(recommenderlab))
+suppressMessages(library(reshape2))
+
+```
+
+
+```{r }
+steam <- read.csv('steam-200k.csv', header = FALSE)[-5]
+
+```
+
+### 
+```{r }
+head(steam)
+
+```
+
+
+### We give user specific column names to the dataset
+```{r }
+colnames(steam) <- c('user', 'game', 'purchase_play', 'hrs')
+str(steam)
+steam_clean <- steam
+
+```
+
+
+### 
+```{r }
+head(steam)
+
+```
+
+
+###  check for any missing values
+```{r }
+sum(is.na(steam))
+apply(steam_clean, 2, function(x) sum(is.na(x)))
+
+```
+There are no missing values
+Also, hrs column, which means hours played is already in numeric, it is crucial for our recommender system.
+
+### Unless game is purchased, it cant be played.
+
+### We are splitting out the purchase_play column into two columns. The data collection essentially duplicates each record with one labelled as 'purchase' and one labelled as 'play'. The 'purchase' row records 1 hour. 
+```{r }
+# split into purchase and play
+steam_clean$purchase <- sapply(steam_clean$purchase_play, function(x) as.numeric(x == 'purchase'))
+steam_clean$play <- sapply(steam_clean$purchase_play, function(x) as.numeric(x == 'play'))
+steam_clean$hrs <- steam_clean$hrs-steam_clean$purchase
+steam_clean <- steam_clean[,-3] # Keep hrs, purchase and play column.
+steam_clean <- aggregate(. ~ user + game, data = steam_clean, FUN = 'sum') # add user and game
+head(steam_clean)
+
+```
+
+here, sapply() is used to apply the function(x) to every value of purchase_play column.
+Aggregate() Function using formula. 1st numerical then categorical. 
+
+Each row in the reformatted dataset represents then a unique interaction user-game.
+
+### Exploratory Data Analysis
+```{r }
+# number of games
+ngames <- length(unique(steam_clean$game))
+
+# number of users
+nusers <- length(unique(steam_clean$user))
+
+cat("There are", ngames, "games purchased by", nusers, "users")
+
+```
+
+##
+
+### Top 20 games with the most users and hours played.
+```{r }
+# most played game
+game_total_hrs <- aggregate(hrs ~ game, data = steam_clean, FUN = 'sum')
+game_total_hrs <- game_total_hrs[order(game_total_hrs$hrs, decreasing = TRUE),]
+most_played_games <- head(game_total_hrs, 20)
+most_played_games <- data.frame(game = most_played_games$game, hrs = most_played_games$hrs)
+df=head(most_played_games, 20)
+df
+
+```
+### Plot of number of hours played for top 20 games.  
+```{r }
+ggplot(df, aes(x = game, y = hrs,fill="blue")) + 
+    geom_bar(stat = "identity") + 
+    theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+    labs(title = "Top 20 most played games ", x = "Game", y = "Hours")
+
+```
+
+
+###  We try to assess if the most purchased games correspond to the most played games.
+```{r }
+# game with the highest number of users
+game_freq <- data.frame(sort(table(steam_clean$game), decreasing = TRUE))
+colnames(game_freq) <- c("game", "nusers")
+top20 <- merge(game_freq, game_total_hrs, by = 'game')
+top20 <- head(top20[order(top20$nusers, decreasing = TRUE),], 20)
+top20
+ggplot(top20, aes(x = game, y = nusers, fill = hrs)) + 
+    geom_bar(stat = "identity") + 
+    theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) +
+    labs(title = "Top 20 games with the most users", x = "Game", y = "Number of users")
+
+```
+
+*** INFERENCE ***
+Clearly Dota 2 has the highest number of players and the highest number of total hours played so undeniably the most popular game. Where as other games such as Ricochet have 524 users but a grand total of 21.2 hours played. an interesting example is ‘Half-Life 2 Lost Coast’ which has a high number of users (981 users), but the total of hours played is quite low (184.4 hours). A possible explanation for this could be that this game was purchased as part of a game bundle. 
+
+We can clearly see that for some cases there is no relation between the total number of users and the total of hours played, meaning that a high number of users does not represent an equivalent high total of hours played.
+
+### 
+```{r }
+head(game_freq)
+
+```
+
+### 
+```{r }
+# how many purchased but did not play
+purchased_not_played <- subset(steam_clean, purchase == 1 & play == 0)
+nTransactions <-nrow(purchased_not_played)
+nusers <- length(unique(purchased_not_played$user))
+nPurchased <- nrow(subset(steam_clean, purchase == 1))
+cat("There are", nTransactions, "games purchased out of", nPurchased, "that have not been played by", nusers, "users")
+
+```
+### lot of games haven't been played.
+```{r }
+rest = subset(steam_clean, play == 1)
+
+
+game_total_hrs1 <- aggregate(hrs ~ game, data = rest, FUN = 'sum')
+game_total_hrs1 <- game_total_hrs1[order(game_total_hrs1$hrs, decreasing = TRUE),]
+most_played_games1 <- head(game_total_hrs1, 20)
+most_played_games1 <- data.frame(game = most_played_games1$game, hrs = most_played_games1$hrs)
+head(most_played_games1, 20)
+
+
+
+
+```
+
+
+
+
+*** INFERENCE ***
+
+
+It seems reasonable to turn the distribution of hours played for a game into a rating, at least it's a reasonable way to view the reception of the game. For example a bad game will have a large distribution around the 0-1 hours and a game which was well received will have a distribution of something greater.
+
+We are going to use the EM algorithm to highlight 5 groups which can be considered 1-5 star ratings. Of course this might not be true, for example a user may only play the game for an average number of hours, but love it and would rate it a 5. The EM algorithm will be more appropriate than simply breaking the data into percentiles.
+
+### Removing space in between values of games column
+```{r }
+# cleaning up the game columns.
+steam_clean$game1 <- gsub("[^a-zA-Z0-9]", "", steam_clean$game)
+head(steam_clean)
+
+```
+
+
+
+### We create the rating system based on the distribution of hours played, this for each game available in the user dataset. We use 5 groups (equivalent to a 5 stars rating system) in order to define a rating users would give to a game they played based on the hours each one played each game relative to that of everyone else.
+```{r }
+# create a rating based on time played
+game_hrs_density <- function(GAME, nclass, print_vals = TRUE){
+  # subsetting data. Ignore the game hrs less than 2 hrs
+  game_data <- subset(steam_clean, game1 == GAME & hrs > 2)
+  game_data$loghrs <- log(game_data$hrs)
+  
+  # em algorithm
+  mu.init <- seq(min(game_data$loghrs), max(game_data$loghrs), length = nclass)
+  EM <- normalmixEM(game_data$loghrs, mu = mu.init, sigma=rep(1, nclass))
+  
+  # print results
+  if(print_vals){
+    cat(" lambda: ", EM$lambda, "\n mean  : ", EM$mu, "\n sigma : ", EM$sigma, "\n")
+  }
+  # building data frame for plotting
+  x <- seq(min(game_data$loghrs), max(game_data$loghrs), 0.01)
+  dens <- data.frame(x = x)
+  for(k in 1:nclass){
+    dens[,paste0('y', k)] <- EM$lambda[k]*dnorm(x, EM$mu[k], EM$sigma[k])
+  }
+  
+  dens <- melt(dens, 'x', variable.name = 'gaussian')
+  game_plt <- ggplot(game_data, aes(x = loghrs)) + 
+    geom_histogram(aes(y = ..density..), bins = 25, colour = "black", alpha = 0.7, size = 0.1) +
+    geom_area(data = dens, aes(x = x, y = value, fill = gaussian), alpha = 0.5, position = position_dodge()) +
+    geom_density(linetype = 2, size = 0.1) + 
+    ggtitle(game_data$game[1])
+
+  return(game_plt)
+}
+game_hrs_density("Fallout4", 5, print_vals = TRUE)
+
+
+```
+
+*** INFERENCE ***
+EM algorithm find groups (5) of people with similar gaming habits and that would potentially rate a game in a similar way.
+
+We can see few users played ‘The Fallout 4’ game for very few hours. It’s possible some of these users lost their interest into the game shortly after starting playing it. The distribution is denser for groups 3 and 4. This shows that the majority of users are interested in this game. So the game like this would be highly rated. 
+
+
+As it is visible from graph, most of those who played the The Witcher 3 stuck with it and played 40+ hours. However there were a few users where The Witcher didn't grab them and stopped playing after a few hours. The EM algorithm does a great job finding the groups of people with similar gaming habits and would potentially rate the game in a similar way. 
+
+The distribution is denser for some groups . This shows that the majority of users are interested in this game.
+
+A user-item matrix is created with the users being the rows and games being the columns. The missing values are set to zero. The observed values are the log hours for each observed user-game combination. The data was subset to games which have greater than 50 users and users which played the game for greater than 2 hours. This was chosen as 2 hours is the limit in which Steam will offer a return if we did not like the purchased game.
+
+To create a test set 10% of the observed values will be set to 0. The root mean squared error will be calculated to determine the accuracy.
+
+### 
+```{r }
+# create user item matrix
+set.seed(0910)
+game_freq$game1 <- gsub("[^a-zA-Z0-9]", "", game_freq$game)
+game_users <- subset(game_freq, game_freq$nusers > 50)
+steam_clean_pos <- subset(steam_clean, steam_clean$hrs > 2 & (steam_clean$game1 %in% game_users$game1))
+steam_clean_pos$loghrs <- log(steam_clean_pos$hrs)
+
+# make matrix
+games <- data.frame(game1 = sort(unique(steam_clean_pos$game1)), game_id = 1:length(unique(steam_clean_pos$game1)))
+users <- data.frame(user = sort(unique(steam_clean_pos$user)), user_id = 1:length(unique(steam_clean_pos$user)))
+steam_clean_pos <- merge(steam_clean_pos, games, by = 'game1')
+steam_clean_pos <- merge(steam_clean_pos, users, by = 'user')
+ui_mat <- matrix(0, nrow = nrow(users), ncol = nrow(games), dimnames = list(user = paste0("u", sort(unique(steam_clean_pos$user))), 
+                                                                            game = sort(unique(steam_clean_pos$game1))))
+for(k in 1:nrow(steam_clean_pos)){
+  ui_mat[steam_clean_pos$user_id[k], steam_clean_pos$game_id[k]] <- steam_clean_pos$loghrs[k]
+}
+
+# create training set i.e. suppress a tenth of the actual ratings
+index <- sample.split(steam_clean_pos$user, SplitRatio = 0.9)
+train <- steam_clean_pos[index,]
+test <- steam_clean_pos[!index,]
+ui_train <- ui_mat
+for(k in 1:nrow(test)){
+  ui_train[test$user_id[k], test$game_id[k]] <- 0
+}
+
+# root mean squared error function
+rmse <- function(pred, test, data_frame = FALSE){
+  test_pred <- rep(NA, nrow(test))
+  for(k in 1:nrow(test)){
+    test_pred[k] <- pred[test$user_id[k], test$game_id[k]]
+  }
+  if(data_frame){
+    return(data.frame(test_pred, test$loghrs))
+  }
+  return(sqrt(1/(nrow(test)-1)*sum((test_pred - test$loghrs)^2)))
+}
+
+cat("Dimensions of training user-item matrix:", dim(ui_train))
+
+```
+
+
+
+## Basic SVD recommender
+
+The basic SVD approach will perform matrix factorisation using the first 60 leading components(iterations). Since the missing values are set to 0 the factorisation will try and recreate them which is not quite what we want. For this example we will simply impute the missing observations with a mean value.
+Leading COMPONENTS means Latent factors.
+
+```{r }
+Y <- ui_train
+
+# mean impute
+Y <- apply(Y, 2, function(x) ifelse(x == 0, mean(x), x))
+Y_svd <- svd(Y)
+U <- Y_svd$u
+V <- Y_svd$v
+D <- Y_svd$d
+ggplot(data.frame(x = 1:length(D), y = D/sum(D)), aes(x = x, y = y)) + 
+    geom_line() + 
+    labs(x = "Leading component", y = "")
+
+# take the leading components
+lc <- 60
+pred <- U[,1:lc] %*% diag(D[1:lc]) %*% t(V[,1:lc])
+
+rmse(pred, test)
+head(rmse(pred, test, TRUE))
+
+```
+
+*** INFERENCE *** 
+Does not give a good prediction
+
+## SVD via gradient descent
+
+We will use a gradient descent approach to find optimal U and V matrices which retain the actual observations with predict the missing values by drawing on the information between similar users and games. We have chosen a learning rate of 0.001 and will run for 200 iterations tracking the RMSE. The objective function is the squared error between the actual observed values and the predicted values.  
+
+### 
+```{r }
+# svd via gradient descent
+# setting matricies
+leading_components <- 60
+Y <- ui_train
+I <- apply(Y, 2, function(x) ifelse(x>0, 1, 0))
+U <- matrix(rnorm(nrow(Y)*leading_components, 0, 0.01), ncol = leading_components)
+V <- matrix(rnorm(ncol(Y)*leading_components, 0, 0.01), ncol = leading_components)
+
+# objective function
+f <- function(U, V){
+  return(sum(I*(U%*%t(V)-Y)^2))
+}
+dfu <- function(U){
+  return((2*I*(U%*%t(V)-Y))%*%V)
+}
+dfv <- function(V){
+  return(t(2*I*(U%*%t(V)-Y))%*%U)
+}
+
+
+# gradient descent
+N <- 200
+alpha <- 0.001
+pred <- round(U%*%t(V), 2)
+fobj <- f(U, V)
+rmsej <- rmse(pred, test)
+#pb <- txtProgressBar(min = 0, max = N, style = 3)
+start <- Sys.time()
+for(k in 1:N){
+  U <- U - alpha*dfu(U)
+  V <- V - alpha*dfv(V)
+  fobj <- c(fobj, f(U, V))
+  pred <- round(U%*%t(V), 2)
+  rmsej <- c(rmsej, rmse(pred, test))
+  #setTxtProgressBar(pb, k)
+}
+close(pb)
+Sys.time()-start
+path1 <- data.frame(itr = 1:(N+1), fobj, fobjp = fobj/max(fobj), rmse = rmsej, rmsep = rmsej/max(rmsej))
+path1gg <- melt(path1[c("itr", "fobjp", "rmsep")], id.vars = "itr")
+ggplot(path1gg, aes(itr, value, color = variable)) + geom_line()+labs(x = "iterations", y = "rmse value")
+dimnames(pred) <- list(user = rownames(ui_train), game = colnames(ui_train))
+
+# printing final iteration
+tail(path1, 1)
+
+```
+
+
+
+A large improvement on the basic SVD approach. The output shows the objective function converged to 0 on the training data, while the error in the test set essentially halved. Interestingly after the 75th iteration the accuracy in the test set decreased. This could be improved by using more leading components, the trade off being computation time. We can stop after 75 to 100 iterations for this data. It is the prediction of the unobserved which is the goal for test data.
+
+Using the predicted user-item matrix, we will look at the distribution of hours and apply an EM algoritm to find a reasonable 1-5 star rating
+
+### 
+```{r }
+# create a rating based on time played
+# should consolodate this with the other one
+game_hrs_density_p <- function(pred, GAME = NULL, nclass, print_vals = TRUE){
+  
+  if(is.null(GAME)){
+    GAME <- sample(colnames(pred), 1)
+  }
+  
+  # subsetting data
+  game_data <- subset(pred[,GAME], pred[,GAME] > 0) 
+  
+  # em algorithm
+  mu.init <- seq(min(game_data), max(game_data), length = nclass)
+  EM <- normalmixEM(game_data, mu = mu.init, sigma=rep(1, nclass), fast = TRUE)
+  
+  # print results
+  if(print_vals){
+    cat(" lambda: ", EM$lambda, "\n mean  : ", EM$mu, "\n sigma : ", EM$sigma, "\n")
+  }
+  
+  # building data frame for plotting
+  x <- seq(min(game_data), max(game_data), 0.01)
+  dens <- data.frame(x = x)
+  for(k in 1:nclass){
+    dens[,paste0('y', k)] <- EM$lambda[k]*dnorm(x, EM$mu[k], EM$sigma[k])
+  }
+  
+  dens <- melt(dens, 'x', variable.name = 'gaussian')
+  game_plt <- ggplot(as.data.frame(game_data), aes(x = game_data)) + 
+    geom_histogram(aes(y = ..density..), bins = 45, colour = "black", alpha = 0.7, size = 0.1) +
+    geom_area(data = dens, aes(x = x, y = value, fill = gaussian), alpha = 0.5, position = position_dodge()) +
+    geom_density(linetype = 2, size = 0.1) + 
+    ggtitle(GAME)
+
+  return(game_plt)
+}
+game_hrs_density_p(pred, "TheWitcher3WildHunt", 5)
+
+```
+
+It is not quite as appropriate this time as all the new predictions create a dense distribution. The 2-4 distributions look like they fit fairly well. The 5 on the other hand is rather flat and only picks up the very end of the tail.
+
+### Now we use a percentile approach to recommend the top 10 games for a user for predicted user item matrix
+```{r }
+# List the top games for a user that they haven't purcahsed
+pred_percentile <- apply(pred, 2, percent_rank)
+top <- function(n, user = NULL){
+  if(is.null(user)){
+    user <- sample(rownames(pred_percentile), 1)
+  }
+  not_purchased <- (I-1)%%2
+  top_games <- names(sort((pred_percentile*not_purchased)[user,], decreasing = TRUE))[1:n]
+  cat("top", n, "recommended games for user", user, ":\n")
+  for(k in 1:n){
+    cat(k, ")", top_games[k], "\n")
+  }
+}
+df1=top(10)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+### 
+```{r }
+
+
+```
+
+
+### 
+```{r }
+
+
+```
+
+
+### 
+```{r }
+
+
+```
+
+
+### 
+```{r }
+
+
+```
+
+
+### 
+```{r }
+
+
+```
+
+
+### 
+```{r }
+
+
+```
+
+
+### 
+```{r }
+
+
+```
+
+
